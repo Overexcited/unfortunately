@@ -1,0 +1,105 @@
+name: Build
+
+on:
+  push:
+
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: true
+          cache-targets: true
+
+      - name: Add Android Rust target
+        run: rustup target add aarch64-linux-android
+
+      - name: Create Secrets file
+        run: |
+          echo "Creating file with interpolated secrets"
+          cat > ./lib/constant/secrets.dart << 'EOF'
+          ${{ secrets.SECRETS }}
+          EOF
+
+      - name: Setup Flutter SDK
+        uses: flutter-actions/setup-flutter@v4
+        with:
+          channel: stable
+          version: 3.35.2
+          cache: true
+          pub-cache: true
+
+      - name: Set Up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+          cache: "gradle"
+
+      - name: Install flutter_rust_bridge_codegen
+        run: |
+          if ! command -v flutter_rust_bridge_codegen >/dev/null 2>&1; then
+            cargo install flutter_rust_bridge_codegen --version 2.12.0 --locked
+          fi
+
+      - name: Install cargo-expand
+        run: |
+          if ! command -v cargo-expand >/dev/null 2>&1; then
+            cargo install cargo-expand --version 1.0.121 --locked
+          fi
+
+      - name: Get Packages
+        run: flutter pub get
+
+      - name: Generate Rust
+        run: |
+          flutter_rust_bridge_codegen generate
+
+      - name: Cache Android NDK
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.ANDROID_HOME }}/ndk/29.0.13113456
+          key: ${{ runner.os }}-android-ndk-29.0.13113456
+
+      - name: Install Android NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          if [ ! -d "$ANDROID_HOME/ndk/29.0.13113456" ]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;29.0.13113456"
+          fi
+
+      - uses: SimonMarquis/android-accept-licenses@v1
+
+      - name: Build Release APK
+        run: |
+          export CARGO_ENCODED_RUSTFLAGS=$(printf '%s\x1f%s\x1f%s' "--remap-path-prefix=$HOME/.cargo/registry/src=/cargo/registry/src" "--remap-path-prefix=$GITHUB_WORKSPACE=." "-Ccodegen-units=1")
+          export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+          flutter build apk --release --split-per-abi --target-platform="android-arm64"
+
+      - name: Sign Release APK with Android test key
+        run: |
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" sign \
+            --key testkey.pk8 \
+            --cert testkey.x509.pem \
+            "build/app/outputs/flutter-apk/app-arm64-v8a-release.apk"
+
+      - name: Rename Release APK
+        run: mv "build/app/outputs/flutter-apk/app-arm64-v8a-release.apk" "build/app/outputs/flutter-apk/GitSink.apk"
+
+      - name: Upload Release Build to Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: GitSink
+          path: |
+            build/app/outputs/flutter-apk/GitSink.apk
