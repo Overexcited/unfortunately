@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:GitSync/api/helper.dart';
@@ -9,6 +11,7 @@ import 'package:GitSync/type/action_run.dart';
 import 'package:GitSync/type/git_provider.dart';
 import 'package:GitSync/type/showcase_feature.dart';
 import 'package:timeago/timeago.dart' as timeago;
+import 'package:url_launcher/url_launcher.dart';
 
 class ActionsPage extends StatefulWidget {
   final GitProvider gitProvider;
@@ -46,6 +49,48 @@ class _ActionsPageState extends State<ActionsPage> {
   (String, String) _parseOwnerRepo() {
     final segments = Uri.parse(widget.remoteWebUrl).pathSegments;
     return (segments[0], segments[1].replaceAll(RegExp(r'\.git$'), ''));
+  }
+
+  Future<void> _openActionRun(ActionRun run) async {
+    final (owner, repo) = _parseOwnerRepo();
+    final date = run.createdAt.toUtc().toIso8601String().substring(0, 10);
+    final url = Uri.parse(
+      "https://api.github.com/repos/$owner/$repo/actions/runs?per_page=100&created=$date",
+    );
+
+    try {
+      final response = await httpGet(
+        url,
+        headers: {
+          "Accept": "application/vnd.github+json",
+          "Authorization": "token ${widget.accessToken}",
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(utf8.decode(response.bodyBytes));
+        final runs = data["workflow_runs"] as List<dynamic>? ?? [];
+        final match = runs.cast<Map<String, dynamic>>().firstWhere(
+          (item) =>
+              item["run_number"] == run.number &&
+              item["name"] == run.name,
+          orElse: () => <String, dynamic>{},
+        );
+
+        final runId = match["id"];
+        if (runId is int) {
+          final runUrl = Uri.parse("https://github.com/$owner/$repo/actions/runs/$runId");
+          await launchUrl(runUrl, mode: LaunchMode.inAppBrowserView);
+          return;
+        }
+      }
+    } catch (_) {}
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Could not open this workflow run.")),
+      );
+    }
   }
 
   void _fetchActionRuns() {
@@ -131,7 +176,6 @@ class _ActionsPageState extends State<ActionsPage> {
                 ],
               ),
             ),
-
             Padding(
               padding: EdgeInsets.symmetric(horizontal: spaceMD),
               child: Row(
@@ -152,9 +196,7 @@ class _ActionsPageState extends State<ActionsPage> {
                 ],
               ),
             ),
-
             SizedBox(height: spaceSM),
-
             Expanded(
               child: RefreshIndicator(
                 color: colours.tertiaryDark,
@@ -193,7 +235,10 @@ class _ActionsPageState extends State<ActionsPage> {
                           }
                           return Padding(
                             padding: EdgeInsets.only(bottom: spaceXS),
-                            child: _ItemActionRun(run: _runs[index]),
+                            child: _ItemActionRun(
+                              run: _runs[index],
+                              onTap: () => _openActionRun(_runs[index]),
+                            ),
                           );
                         },
                       ),
@@ -258,129 +303,104 @@ String _formatDuration(Duration d) {
 
 class _ItemActionRun extends StatelessWidget {
   final ActionRun run;
+  final VoidCallback onTap;
 
-  const _ItemActionRun({required this.run});
+  const _ItemActionRun({required this.run, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     final relativeTime = timeago.format(run.createdAt, locale: 'en').replaceFirstMapped(RegExp(r'^[A-Z]'), (match) => match.group(0)!.toLowerCase());
     final (icon, color) = _statusIconAndColor(run.status);
 
-    return Container(
-      padding: EdgeInsets.all(spaceSM),
-      decoration: BoxDecoration(color: colours.secondaryDark, borderRadius: BorderRadius.all(cornerRadiusSM)),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Row 1: Status icon + workflow name
-          Row(
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.all(cornerRadiusSM),
+        child: Container(
+          padding: EdgeInsets.all(spaceSM),
+          decoration: BoxDecoration(color: colours.secondaryDark, borderRadius: BorderRadius.all(cornerRadiusSM)),
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Padding(
-                padding: EdgeInsets.only(top: spaceXXXXS),
-                child: FaIcon(icon, size: textMD, color: color),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: EdgeInsets.only(top: spaceXXXXS),
+                    child: FaIcon(icon, size: textMD, color: color),
+                  ),
+                  SizedBox(width: spaceXS),
+                  Expanded(
+                    child: Text(
+                      run.name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: colours.primaryLight, fontSize: textMD, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
               ),
-              SizedBox(width: spaceXS),
-              Expanded(
-                child: Text(
-                  run.name,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: colours.primaryLight, fontSize: textMD, fontWeight: FontWeight.bold),
+              SizedBox(height: spaceXXS),
+              Padding(
+                padding: EdgeInsets.only(left: textMD + spaceXS),
+                child: Row(
+                  children: [
+                    Text('#${run.number}', style: TextStyle(color: colours.tertiaryLight, fontSize: textXS)),
+                    Text(' $bullet ', style: TextStyle(color: colours.tertiaryLight, fontSize: textXS)),
+                    Flexible(
+                      child: Text(run.authorUsername, overflow: TextOverflow.ellipsis, style: TextStyle(color: colours.secondaryLight, fontSize: textXS)),
+                    ),
+                    Text(' $bullet ', style: TextStyle(color: colours.tertiaryLight, fontSize: textXS)),
+                    Text(relativeTime, style: TextStyle(color: colours.tertiaryLight, fontSize: textXS)),
+                    if (run.duration != null) ...[
+                      Text(' $bullet ', style: TextStyle(color: colours.tertiaryLight, fontSize: textXS)),
+                      Text(_formatDuration(run.duration!), style: TextStyle(color: colours.tertiaryLight, fontSize: textXS)),
+                    ],
+                  ],
                 ),
               ),
+              if (run.branch != null || run.prNumber != null) ...[
+                SizedBox(height: spaceXXS),
+                Padding(
+                  padding: EdgeInsets.only(left: textMD + spaceXS),
+                  child: Wrap(
+                    spacing: spaceXXXS,
+                    runSpacing: spaceXXXS,
+                    children: [
+                      if (run.branch != null)
+                        Container(
+                          padding: EdgeInsets.symmetric(horizontal: spaceXXS, vertical: spaceXXXXS),
+                          decoration: BoxDecoration(color: colours.tertiaryDark, borderRadius: BorderRadius.all(cornerRadiusXS)),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              FaIcon(FontAwesomeIcons.codeBranch, size: textXXS, color: colours.tertiaryLight),
+                              SizedBox(width: spaceXXXXS),
+                              Text(run.branch!, style: TextStyle(color: colours.tertiaryLight, fontSize: textXXS, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
+                      if (run.prNumber != null)
+                        Container(
+                          padding: EdgeInsets.symmetric(horizontal: spaceXXS, vertical: spaceXXXXS),
+                          decoration: BoxDecoration(color: colours.tertiaryDark, borderRadius: BorderRadius.all(cornerRadiusXS)),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              FaIcon(FontAwesomeIcons.codePullRequest, size: textXXS, color: colours.tertiaryLight),
+                              SizedBox(width: spaceXXXXS),
+                              Text('#${run.prNumber}', style: TextStyle(color: colours.tertiaryLight, fontSize: textXXS, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
             ],
           ),
-          SizedBox(height: spaceXXS),
-
-          // Row 2: #number, author, relative time, duration
-          Padding(
-            padding: EdgeInsets.only(left: textMD + spaceXS),
-            child: Row(
-              children: [
-                Text(
-                  '#${run.number}',
-                  style: TextStyle(color: colours.tertiaryLight, fontSize: textXS),
-                ),
-                Text(
-                  ' $bullet ',
-                  style: TextStyle(color: colours.tertiaryLight, fontSize: textXS),
-                ),
-                Flexible(
-                  child: Text(
-                    run.authorUsername,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: colours.secondaryLight, fontSize: textXS),
-                  ),
-                ),
-                Text(
-                  ' $bullet ',
-                  style: TextStyle(color: colours.tertiaryLight, fontSize: textXS),
-                ),
-                Text(
-                  relativeTime,
-                  style: TextStyle(color: colours.tertiaryLight, fontSize: textXS),
-                ),
-                if (run.duration != null) ...[
-                  Text(
-                    ' $bullet ',
-                    style: TextStyle(color: colours.tertiaryLight, fontSize: textXS),
-                  ),
-                  Text(
-                    _formatDuration(run.duration!),
-                    style: TextStyle(color: colours.tertiaryLight, fontSize: textXS),
-                  ),
-                ],
-              ],
-            ),
-          ),
-
-          // Row 3: Branch and PR chips
-          if (run.branch != null || run.prNumber != null) ...[
-            SizedBox(height: spaceXXS),
-            Padding(
-              padding: EdgeInsets.only(left: textMD + spaceXS),
-              child: Wrap(
-                spacing: spaceXXXS,
-                runSpacing: spaceXXXS,
-                children: [
-                  if (run.branch != null)
-                    Container(
-                      padding: EdgeInsets.symmetric(horizontal: spaceXXS, vertical: spaceXXXXS),
-                      decoration: BoxDecoration(color: colours.tertiaryDark, borderRadius: BorderRadius.all(cornerRadiusXS)),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          FaIcon(FontAwesomeIcons.codeBranch, size: textXXS, color: colours.tertiaryLight),
-                          SizedBox(width: spaceXXXXS),
-                          Text(
-                            run.branch!,
-                            style: TextStyle(color: colours.tertiaryLight, fontSize: textXXS, fontWeight: FontWeight.bold),
-                          ),
-                        ],
-                      ),
-                    ),
-                  if (run.prNumber != null)
-                    Container(
-                      padding: EdgeInsets.symmetric(horizontal: spaceXXS, vertical: spaceXXXXS),
-                      decoration: BoxDecoration(color: colours.tertiaryDark, borderRadius: BorderRadius.all(cornerRadiusXS)),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          FaIcon(FontAwesomeIcons.codePullRequest, size: textXXS, color: colours.tertiaryLight),
-                          SizedBox(width: spaceXXXXS),
-                          Text(
-                            '#${run.prNumber}',
-                            style: TextStyle(color: colours.tertiaryLight, fontSize: textXXS, fontWeight: FontWeight.bold),
-                          ),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ],
-        ],
+        ),
       ),
     );
   }
