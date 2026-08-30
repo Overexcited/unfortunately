@@ -12,6 +12,7 @@ import 'package:GitSync/type/git_provider.dart';
 import 'package:GitSync/type/showcase_feature.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:http/http.dart' as http;
 
 class ActionsPage extends StatefulWidget {
   final GitProvider gitProvider;
@@ -79,6 +80,14 @@ class _ActionsPageState extends State<ActionsPage> {
 
         final runId = match["id"];
         if (runId is int) {
+          if (run.status == ActionRunStatus.success) {
+            final artifactUrl = await _getArtifactDownloadUrl(owner, repo, runId);
+            if (artifactUrl != null) {
+              await launchUrl(artifactUrl, mode: LaunchMode.inAppBrowserView);
+              return;
+            }
+          }
+
           final runUrl = Uri.parse("https://github.com/$owner/$repo/actions/runs/$runId");
           await launchUrl(runUrl, mode: LaunchMode.inAppBrowserView);
           return;
@@ -91,6 +100,57 @@ class _ActionsPageState extends State<ActionsPage> {
         const SnackBar(content: Text("Could not open this workflow run.")),
       );
     }
+  }
+
+  Future<Uri?> _getArtifactDownloadUrl(String owner, String repo, int runId) async {
+    final artifactsUrl = Uri.parse(
+      "https://api.github.com/repos/$owner/$repo/actions/runs/$runId/artifacts?per_page=100",
+    );
+
+    final response = await httpGet(
+      artifactsUrl,
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "Authorization": "token ${widget.accessToken}",
+      },
+    );
+
+    if (response.statusCode != 200) return null;
+
+    final data = json.decode(utf8.decode(response.bodyBytes));
+    final artifacts = data["artifacts"] as List<dynamic>? ?? [];
+    final availableArtifacts = artifacts.whereType<Map<String, dynamic>>().where((artifact) => artifact["expired"] != true).toList();
+    if (availableArtifacts.isEmpty) return null;
+
+    final artifact = availableArtifacts.firstWhere(
+      (item) => item["name"] == "GitSink",
+      orElse: () => availableArtifacts.first,
+    );
+    final artifactId = artifact["id"];
+    if (artifactId is! int) return null;
+
+    final downloadApiUrl = Uri.parse(
+      "https://api.github.com/repos/$owner/$repo/actions/artifacts/$artifactId/zip",
+    );
+
+    final client = http.Client();
+    try {
+      final request = http.Request("GET", downloadApiUrl)
+        ..followRedirects = false
+        ..headers.addAll({
+          "Accept": "application/vnd.github+json",
+          "Authorization": "token ${widget.accessToken}",
+        });
+      final downloadResponse = await client.send(request);
+      final location = downloadResponse.headers["location"];
+      if (downloadResponse.statusCode >= 300 && downloadResponse.statusCode < 400 && location != null) {
+        return Uri.tryParse(location);
+      }
+    } finally {
+      client.close();
+    }
+
+    return null;
   }
 
   void _fetchActionRuns() {
